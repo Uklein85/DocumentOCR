@@ -2,12 +2,10 @@ name: Build EXE
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -27,11 +25,11 @@ jobs:
       
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name DocumentOCR main.py
+          pyinstaller --onefile --console --name DocumentOCR main.py
       
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/DocumentOCR.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: DocumentOCR-exe
+          path: dist/DocumentOCR.exe
+          retention-days: 30
