@@ -2,21 +2,65 @@
 OCR Engines Module
 Модуль с поддержкой нескольких OCR движков для распознавания текста
 Использует PyMuPDF для работы с PDF (не требует Poppler)
+
+Разработчик: Уклеин И.В.
+Организация: АО "СТНГ"
+Город: г. Новосибирск
+Год: 2026
 """
 
 import os
+import sys
 import cv2
 import numpy as np
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-import json
-import csv
-from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# АВТООПРЕДЕЛЕНИЕ TESSDATA_PREFIX
+# ============================================================
+
+def _find_tessdata_prefix() -> Optional[str]:
+    """Автоматический поиск папки tessdata для Tesseract"""
+    if 'TESSDATA_PREFIX' in os.environ:
+        return os.environ['TESSDATA_PREFIX']
+    
+    search_paths = [
+        r'C:\Program Files\Tesseract-OCR\tessdata',
+        r'C:\Program Files (x86)\Tesseract-OCR\tessdata',
+        r'C:\Users\PC_ACER\AppData\Local\Tesseract-OCR\tessdata',
+    ]
+    
+    # Поиск в PATH
+    path_dirs = os.environ.get('PATH', '').split(os.pathsep)
+    for d in path_dirs:
+        if 'tesseract' in d.lower():
+            tessdata = os.path.join(d, 'tessdata')
+            if os.path.isdir(tessdata):
+                return tessdata
+    
+    for path in search_paths:
+        if os.path.isdir(path):
+            return path
+    
+    return None
+
+
+_tessdata = _find_tessdata_prefix()
+if _tessdata:
+    os.environ['TESSDATA_PREFIX'] = _tessdata
+    logger.info(f"Найден TESSDATA_PREFIX: {_tessdata}")
+else:
+    logger.warning("TESSDATA_PREFIX не найден. Tesseract может не работать.")
 
 
 # ============================================================
@@ -46,7 +90,7 @@ class OCRResult:
 
 
 # ============================================================
-# АБСТРАКТНЫЙ БАЗОВЫЙ КЛАСС OCR ДВИЖКА
+# АБСТРАКТНЫЙ БАЗОВЫЙ КЛАСС
 # ============================================================
 
 class OCREngine(ABC):
@@ -56,11 +100,16 @@ class OCREngine(ABC):
         self.languages = languages or ['ru', 'en']
         self.name = "BaseEngine"
         self._is_available = False
+        self._error_message = ""
         
     @property
     def is_available(self) -> bool:
         return self._is_available
     
+    @property
+    def error_message(self) -> str:
+        return self._error_message
+    
     @abstractmethod
     def recognize(self, image: np.ndarray) -> OCRResult:
         pass
@@ -71,110 +120,14 @@ class OCREngine(ABC):
 
 
 # ============================================================
-# ДВИЖОК 1: EASYOCR
-# ============================================================
-
-class EasyOCREngine(OCREngine):
-    """EasyOCR - открытый код, PyTorch-based"""
-    
-    def __init__(self, languages: List[str] = None, gpu: bool = False):
-        super().__init__(languages)
-        self.name = "EasyOCR"
-        self.gpu = gpu
-        
-        try:
-            import easyocr
-            lang_map = {'ru': 'ru', 'en': 'en', 'rus': 'ru', 'eng': 'en'}
-            self.easyocr_langs = [lang_map.get(l, l) for l in self.languages]
-            
-            logger.info(f"Инициализация EasyOCR с языками: {self.easyocr_langs}")
-            self.reader = easyocr.Reader(
-                self.easyocr_langs, 
-                gpu=self.gpu,
-                verbose=False
-            )
-            self._is_available = True
-            logger.info("✅ EasyOCR успешно инициализирован")
-        except ImportError as e:
-            logger.warning(f"❌ EasyOCR не установлен: {e}")
-            logger.warning("   Решение: pip install easyocr")
-            self._is_available = False
-        except Exception as e:
-            logger.error(f"❌ Ошибка EasyOCR: {type(e).__name__}: {e}")
-            self._is_available = False
-    
-    def recognize(self, image: np.ndarray) -> OCRResult:
-        if not self._is_available:
-            raise RuntimeError("EasyOCR недоступен")
-        
-        results = self.reader.readtext(image)
-        
-        blocks = []
-        texts = []
-        confidences = []
-        
-        for detection in results:
-            bbox, text, confidence = detection
-            blocks.append(TextBlock(
-                text=text,
-                confidence=confidence,
-                bbox=bbox
-            ))
-            texts.append(text)
-            confidences.append(confidence)
-        
-        return OCRResult(
-            text='\n'.join(texts),
-            blocks=blocks,
-            confidence=float(np.mean(confidences)) if confidences else 0.0,
-            engine=self.name,
-            language='+'.join(self.languages)
-        )
-    
-    def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        result = self.recognize(image)
-        
-        for block in result.blocks:
-            if block.bbox and len(block.bbox) >= 2:
-                height = abs(block.bbox[2][1] - block.bbox[0][1])
-                block.font_size = height
-                block.is_bold = self._estimate_bold(image, block.bbox)
-        
-        return result
-    
-    def _estimate_bold(self, image: np.ndarray, bbox: List) -> bool:
-        try:
-            x_coords = [int(p[0]) for p in bbox]
-            y_coords = [int(p[1]) for p in bbox]
-            
-            x_min, x_max = min(x_coords), max(x_coords)
-            y_min, y_max = min(y_coords), max(y_coords)
-            
-            if x_max <= x_min or y_max <= y_min:
-                return False
-            
-            roi = image[y_min:y_max, x_min:x_max]
-            if roi.size == 0:
-                return False
-            
-            if len(roi.shape) == 3:
-                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = roi
-            
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            density = np.sum(binary > 0) / binary.size
-            return density > 0.35
-        except Exception:
-            return False
-
-
-# ============================================================
-# ДВИЖОК 2: RAPIDOCR
+# ДВИЖОК 1: RAPIDOCR (ОСНОВНОЙ - самый надежный)
 # ============================================================
 
 class RapidOCREngine(OCREngine):
-    """RapidOCR - легковесная обертка над PaddleOCR через ONNX"""
+    """
+    RapidOCR - легковесный OCR на базе ONNX
+    Не требует внешних программ, работает автономно
+    """
     
     def __init__(self, languages: List[str] = None):
         super().__init__(languages)
@@ -182,20 +135,34 @@ class RapidOCREngine(OCREngine):
         
         try:
             from rapidocr_onnxruntime import RapidOCR
+            
+            # Для PyInstaller: поиск config.yaml
+            if getattr(sys, 'frozen', False):
+                base_path = sys._MEIPASS
+                config_path = os.path.join(base_path, 'rapidocr_onnxruntime', 'config.yaml')
+                if os.path.exists(config_path):
+                    os.environ['RAPIDOCR_CONFIG'] = config_path
+            
             self.engine = RapidOCR()
             self._is_available = True
             logger.info("✅ RapidOCR успешно инициализирован")
         except ImportError as e:
+            self._error_message = f"Не установлен: {e}"
             logger.warning(f"❌ RapidOCR не установлен: {e}")
             logger.warning("   Решение: pip install rapidocr-onnxruntime")
             self._is_available = False
+        except FileNotFoundError as e:
+            self._error_message = f"Не найден config.yaml: {e}"
+            logger.warning(f"❌ RapidOCR: {e}")
+            self._is_available = False
         except Exception as e:
+            self._error_message = f"{type(e).__name__}: {e}"
             logger.error(f"❌ Ошибка RapidOCR: {type(e).__name__}: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
         if not self._is_available:
-            raise RuntimeError("RapidOCR недоступен")
+            raise RuntimeError(f"RapidOCR недоступен: {self._error_message}")
         
         result, _ = self.engine(image)
         
@@ -235,82 +202,7 @@ class RapidOCREngine(OCREngine):
 
 
 # ============================================================
-# ДВИЖОК 3: PADDLEOCR
-# ============================================================
-
-class PaddleOCREngine(OCREngine):
-    """PaddleOCR от Baidu - открытый код"""
-    
-    def __init__(self, languages: List[str] = None, use_gpu: bool = False):
-        super().__init__(languages)
-        self.name = "PaddleOCR"
-        
-        try:
-            from paddleocr import PaddleOCR
-            
-            lang_map = {'ru': 'ru', 'en': 'en', 'rus': 'ru', 'eng': 'en'}
-            primary_lang = lang_map.get(self.languages[0], 'ru')
-            
-            logger.info(f"Инициализация PaddleOCR с языком: {primary_lang}")
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang=primary_lang,
-                use_gpu=use_gpu,
-                show_log=False
-            )
-            self._is_available = True
-            logger.info("✅ PaddleOCR успешно инициализирован")
-        except ImportError as e:
-            logger.warning(f"❌ PaddleOCR не установлен: {e}")
-            logger.warning("   Решение: pip install paddlepaddle paddleocr")
-            self._is_available = False
-        except Exception as e:
-            logger.error(f"❌ Ошибка PaddleOCR: {type(e).__name__}: {e}")
-            self._is_available = False
-    
-    def recognize(self, image: np.ndarray) -> OCRResult:
-        if not self._is_available:
-            raise RuntimeError("PaddleOCR недоступен")
-        
-        result = self.ocr.ocr(image, cls=True)
-        
-        if not result or not result[0]:
-            return OCRResult(
-                text='',
-                blocks=[],
-                confidence=0.0,
-                engine=self.name,
-                language='+'.join(self.languages)
-            )
-        
-        blocks = []
-        texts = []
-        confidences = []
-        
-        for line in result[0]:
-            bbox, (text, confidence) = line
-            blocks.append(TextBlock(
-                text=text,
-                confidence=confidence,
-                bbox=bbox
-            ))
-            texts.append(text)
-            confidences.append(confidence)
-        
-        return OCRResult(
-            text='\n'.join(texts),
-            blocks=blocks,
-            confidence=float(np.mean(confidences)) if confidences else 0.0,
-            engine=self.name,
-            language='+'.join(self.languages)
-        )
-    
-    def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        return self.recognize(image)
-
-
-# ============================================================
-# ДВИЖОК 4: TESSERACT
+# ДВИЖОК 2: TESSERACT
 # ============================================================
 
 class TesseractEngine(OCREngine):
@@ -323,6 +215,7 @@ class TesseractEngine(OCREngine):
         try:
             import pytesseract
             
+            # Настройка пути к Tesseract
             if tesseract_path:
                 pytesseract.pytesseract.tesseract_cmd = tesseract_path
             elif os.name == 'nt':
@@ -334,27 +227,47 @@ class TesseractEngine(OCREngine):
                         pytesseract.pytesseract.tesseract_cmd = path
                         break
             
+            # Проверка версии
+            pytesseract.get_tesseract_version()
+            
+            # Маппинг языков
             lang_map = {'ru': 'rus', 'en': 'eng', 'rus': 'rus', 'eng': 'eng'}
             self.tess_langs = '+'.join([lang_map.get(l, l) for l in self.languages])
             
-            pytesseract.get_tesseract_version()
+            # Проверка наличия языковых файлов
+            tessdata = os.environ.get('TESSDATA_PREFIX', '')
+            if tessdata:
+                for lang in self.tess_langs.split('+'):
+                    lang_file = os.path.join(tessdata, f"{lang}.traineddata")
+                    if not os.path.exists(lang_file):
+                        raise FileNotFoundError(
+                            f"Языковой файл не найден: {lang_file}\n"
+                            f"Скачайте с https://github.com/tesseract-ocr/tessdata"
+                        )
+            
             self._is_available = True
             logger.info(f"✅ Tesseract инициализирован с языками: {self.tess_langs}")
         except ImportError as e:
-            logger.warning(f"❌ pytesseract не установлен: {e}")
+            self._error_message = f"pytesseract не установлен: {e}"
+            logger.warning(f"❌ {self._error_message}")
+            self._is_available = False
+        except FileNotFoundError as e:
+            self._error_message = str(e)
+            logger.warning(f"❌ Tesseract: {e}")
             self._is_available = False
         except Exception as e:
+            self._error_message = f"{type(e).__name__}: {e}"
             logger.warning(f"❌ Tesseract недоступен: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
         if not self._is_available:
-            raise RuntimeError("Tesseract недоступен")
+            raise RuntimeError(f"Tesseract недоступен: {self._error_message}")
         
         import pytesseract
         
         text = pytesseract.image_to_string(
-            image, 
+            image,
             lang=self.tess_langs,
             config='--oem 3 --psm 6'
         )
@@ -369,7 +282,7 @@ class TesseractEngine(OCREngine):
     
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
         if not self._is_available:
-            raise RuntimeError("Tesseract недоступен")
+            raise RuntimeError(f"Tesseract недоступен: {self._error_message}")
         
         import pytesseract
         
@@ -411,13 +324,96 @@ class TesseractEngine(OCREngine):
 
 
 # ============================================================
+# ДВИЖОК 3: EASYOCR (опциональный)
+# ============================================================
+
+class EasyOCREngine(OCREngine):
+    """EasyOCR - PyTorch-based"""
+    
+    def __init__(self, languages: List[str] = None, gpu: bool = False):
+        super().__init__(languages)
+        self.name = "EasyOCR"
+        self.gpu = gpu
+        
+        try:
+            # Проверка torchvision
+            import torchvision
+            if not hasattr(torchvision.ops, 'nms'):
+                raise RuntimeError("torchvision.ops.nms не доступен")
+            
+            import easyocr
+            lang_map = {'ru': 'ru', 'en': 'en', 'rus': 'ru', 'eng': 'en'}
+            self.easyocr_langs = [lang_map.get(l, l) for l in self.languages]
+            
+            self.reader = easyocr.Reader(
+                self.easyocr_langs,
+                gpu=self.gpu,
+                verbose=False
+            )
+            self._is_available = True
+            logger.info("✅ EasyOCR успешно инициализирован")
+        except ImportError as e:
+            self._error_message = f"Не установлен: {e}"
+            logger.warning(f"❌ EasyOCR не установлен: {e}")
+            self._is_available = False
+        except RuntimeError as e:
+            self._error_message = f"Проблема с torchvision: {e}"
+            logger.warning(f"❌ EasyOCR: {e}")
+            logger.warning("   Решение: pip install --upgrade torch torchvision")
+            self._is_available = False
+        except Exception as e:
+            self._error_message = f"{type(e).__name__}: {e}"
+            logger.error(f"❌ Ошибка EasyOCR: {type(e).__name__}: {e}")
+            self._is_available = False
+    
+    def recognize(self, image: np.ndarray) -> OCRResult:
+        if not self._is_available:
+            raise RuntimeError(f"EasyOCR недоступен: {self._error_message}")
+        
+        results = self.reader.readtext(image)
+        
+        blocks = []
+        texts = []
+        confidences = []
+        
+        for detection in results:
+            bbox, text, confidence = detection
+            blocks.append(TextBlock(
+                text=text,
+                confidence=confidence,
+                bbox=bbox
+            ))
+            texts.append(text)
+            confidences.append(confidence)
+        
+        return OCRResult(
+            text='\n'.join(texts),
+            blocks=blocks,
+            confidence=float(np.mean(confidences)) if confidences else 0.0,
+            engine=self.name,
+            language='+'.join(self.languages)
+        )
+    
+    def recognize_with_details(self, image: np.ndarray) -> OCRResult:
+        result = self.recognize(image)
+        
+        for block in result.blocks:
+            if block.bbox and len(block.bbox) >= 2:
+                height = abs(block.bbox[2][1] - block.bbox[0][1])
+                block.font_size = height
+        
+        return result
+
+
+# ============================================================
 # МЕНЕДЖЕР OCR ДВИЖКОВ
 # ============================================================
 
 class OCREngineManager:
     """Менеджер для выбора и переключения OCR движков"""
     
-    PRIORITY = ['PaddleOCR', 'EasyOCR', 'RapidOCR', 'Tesseract']
+    # Приоритет: RapidOCR первый (самый надежный)
+    PRIORITY = ['RapidOCR', 'Tesseract', 'EasyOCR']
     
     def __init__(self, preferred_engine: str = None, languages: List[str] = None):
         self.languages = languages or ['ru', 'en']
@@ -430,21 +426,21 @@ class OCREngineManager:
         logger.info("Инициализация OCR движков...")
         
         engine_classes = [
-            ('EasyOCR', lambda: EasyOCREngine(self.languages)),
             ('RapidOCR', lambda: RapidOCREngine(self.languages)),
-            ('PaddleOCR', lambda: PaddleOCREngine(self.languages)),
             ('Tesseract', lambda: TesseractEngine(self.languages)),
+            ('EasyOCR', lambda: EasyOCREngine(self.languages)),
         ]
         
         for name, factory in engine_classes:
             try:
                 engine = factory()
                 self.engines[name] = engine
-                status = "✓ доступен" if engine.is_available else "✗ недоступен"
+                status = "✓ доступен" if engine.is_available else f"✗ недоступен ({engine.error_message})"
                 logger.info(f"  {name}: {status}")
             except Exception as e:
                 logger.warning(f"Ошибка инициализации {name}: {e}")
         
+        # Выбор текущего движка
         if preferred and preferred in self.engines and self.engines[preferred].is_available:
             self.current_engine = self.engines[preferred]
         else:
@@ -454,12 +450,17 @@ class OCREngineManager:
                     break
         
         if self.current_engine:
-            logger.info(f"Выбран движок: {self.current_engine.name}")
+            logger.info(f"✅ Выбран движок: {self.current_engine.name}")
         else:
-            logger.error("Ни один OCR движок не доступен!")
+            logger.error("❌ Ни один OCR движок не доступен!")
     
     def get_available_engines(self) -> List[str]:
         return [name for name, engine in self.engines.items() if engine.is_available]
+    
+    def get_engine_error(self, engine_name: str) -> str:
+        if engine_name in self.engines:
+            return self.engines[engine_name].error_message
+        return "Неизвестный движок"
     
     def switch_engine(self, engine_name: str) -> bool:
         if engine_name in self.engines and self.engines[engine_name].is_available:
@@ -543,12 +544,12 @@ class ImagePreprocessor:
         (h, w) = image.shape[:2]
         center = (w // 2, h // 2)
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        return cv2.warpAffine(image, M, (w, h), 
-                              flags=cv2.INTER_CUBIC, 
+        return cv2.warpAffine(image, M, (w, h),
+                              flags=cv2.INTER_CUBIC,
                               borderMode=cv2.BORDER_REPLICATE)
     
     @classmethod
-    def full_pipeline(cls, image: np.ndarray, 
+    def full_pipeline(cls, image: np.ndarray,
                       deskew: bool = True,
                       denoise: bool = True,
                       enhance: bool = True,
@@ -627,7 +628,7 @@ class TableExtractor:
                     'page': table.page
                 })
         except ImportError:
-            logger.warning("Camelot не установлен. Установите: pip install camelot-py[cv]")
+            logger.info("Camelot не установлен - таблицы из PDF не будут извлечены")
         except Exception as e:
             logger.error(f"Ошибка извлечения таблиц: {e}")
         
@@ -639,7 +640,7 @@ class TableExtractor:
         
         try:
             gray = ImagePreprocessor.to_grayscale(image)
-            _, binary = cv2.threshold(gray, 0, 255, 
+            _, binary = cv2.threshold(gray, 0, 255,
                                        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             
             horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
