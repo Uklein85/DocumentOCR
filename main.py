@@ -1,3 +1,11 @@
+"""
+DocumentOCR - Программа для распознавания сканированных документов
+Разработчик: Уклеин И.В.
+Организация: АО "СТНГ"
+Город: г. Новосибирск
+Год: 2026
+"""
+
 import sys
 import os
 import cv2
@@ -8,7 +16,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTextEdit, QTabWidget,
     QProgressBar, QComboBox, QCheckBox, QGroupBox, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QStatusBar,
-    QMessageBox, QFrame, QScrollArea, QSizePolicy, QSpinBox
+    QMessageBox, QFrame, QScrollArea, QSizePolicy, QSpinBox,
+    QStatusBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QPalette, QColor
@@ -17,21 +26,21 @@ import json
 import csv
 from datetime import datetime
 
-# Импорт OCR движков (из предыдущего кода)
+# Импорт OCR движков
 from ocr_engines import OCREngineManager, ImagePreprocessor, FontAnalyzer, TableExtractor
 
 
 # ============================================================
-# ПОТОК ОБРАБОТКИ (чтобы не блокировать GUI)
+# ПОТОК ОБРАБОТКИ
 # ============================================================
 
 class ProcessingThread(QThread):
     """Поток для обработки документа без блокировки интерфейса"""
     
-    progress = pyqtSignal(int, str)          # прогресс, сообщение
-    finished = pyqtSignal(dict)              # результат
-    error = pyqtSignal(str)                  # ошибка
-    page_processed = pyqtSignal(int, int)    # текущая страница, всего
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    page_processed = pyqtSignal(int, int)
     
     def __init__(self, file_path, ocr_manager, preprocess=True, dpi=300):
         super().__init__()
@@ -102,11 +111,16 @@ class ProcessingThread(QThread):
         }
     
     def _process_pdf(self):
-        from pdf2image import convert_from_path
+        """Обработка PDF через PyMuPDF (не требует Poppler)"""
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError("Установите PyMuPDF: pip install PyMuPDF")
         
-        self.progress.emit(5, "Конвертация PDF...")
-        images = convert_from_path(self.file_path, dpi=self.dpi)
-        total = len(images)
+        self.progress.emit(5, "Открытие PDF...")
+        
+        doc = fitz.open(self.file_path)
+        total = len(doc)
         
         result = {
             'file': self.file_path,
@@ -122,15 +136,25 @@ class ProcessingThread(QThread):
         all_blocks = []
         confidences = []
         
-        for i, image in enumerate(images, 1):
+        for i in range(total):
             if not self._is_running:
                 break
             
-            progress = 10 + int(80 * i / total)
-            self.progress.emit(progress, f"Страница {i}/{total}...")
-            self.page_processed.emit(i, total)
+            progress = 10 + int(80 * (i + 1) / total)
+            self.progress.emit(progress, f"Страница {i+1}/{total}...")
+            self.page_processed.emit(i + 1, total)
             
-            img_array = np.array(image)
+            page = doc[i]
+            mat = fitz.Matrix(300 / 72, 300 / 72)
+            pix = page.get_pixmap(matrix=mat)
+            
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8)
+            img_array = img_array.reshape(pix.height, pix.width, pix.n)
+            
+            if pix.n == 4:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
             
             if self.preprocess:
                 processed = self.preprocessor.full_pipeline(img_array)
@@ -140,20 +164,22 @@ class ProcessingThread(QThread):
             ocr_result = self.ocr_manager.recognize(processed, with_details=True)
             
             page_data = {
-                'page_number': i,
+                'page_number': i + 1,
                 'text': ocr_result.text,
                 'confidence': ocr_result.confidence,
                 'blocks_count': len(ocr_result.blocks)
             }
             
             result['pages'].append(page_data)
-            result['full_text'] += f"\n--- Страница {i} ---\n{ocr_result.text}\n"
+            result['full_text'] += f"\n--- Страница {i+1} ---\n{ocr_result.text}\n"
             all_blocks.extend(ocr_result.blocks)
             confidences.append(ocr_result.confidence)
         
+        doc.close()
+        
         result['overall_confidence'] = float(np.mean(confidences)) if confidences else 0
         result['font_analysis'] = self.font_analyzer.analyze_blocks(all_blocks)
-        result['engine_used'] = self.ocr_manager.current_engine.name
+        result['engine_used'] = self.ocr_manager.current_engine.name if self.ocr_manager.current_engine else 'Неизвестно'
         result['text'] = result['full_text']
         result['confidence'] = result['overall_confidence']
         
@@ -165,6 +191,79 @@ class ProcessingThread(QThread):
 
 
 # ============================================================
+# ОБЛАСТЬ DRAG & DROP (УМЕНЬШЕННАЯ)
+# ============================================================
+
+class DropArea(QFrame):
+    """Компактная область для перетаскивания файлов"""
+    
+    file_dropped = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(150)
+        self.setObjectName("dropArea")
+        
+        layout = QHBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        self.icon_label = QLabel("📁")
+        self.icon_label.setFont(QFont("Segoe UI Emoji", 32))
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.icon_label)
+        
+        self.text_label = QLabel("Перетащите файл сюда\nили нажмите «Открыть файл»")
+        self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_label.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(self.text_label)
+        
+        self._apply_styles()
+    
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            #dropArea {
+                background-color: #fafafa;
+                border: 2px dashed #c0c0c0;
+                border-radius: 8px;
+            }
+            #dropArea:hover {
+                background-color: #f0f7ff;
+                border-color: #0078d4;
+            }
+        """)
+    
+    def set_file(self, filename):
+        self.text_label.setText(f"✓ {filename}")
+        self.icon_label.setText("✓")
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+            self.setStyleSheet("""
+                #dropArea {
+                    background-color: #e3f2fd;
+                    border: 2px dashed #0078d4;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            event.ignore()
+    
+    def dragLeaveEvent(self, event):
+        self._apply_styles()
+    
+    def dropEvent(self, event):
+        self._apply_styles()
+        urls = event.mimeData().urls()
+        if urls:
+            file_path = urls[0].toLocalFile()
+            self.file_dropped.emit(file_path)
+
+
+# ============================================================
 # ГЛАВНОЕ ОКНО
 # ============================================================
 
@@ -172,10 +271,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DocumentOCR — Распознавание документов")
-        self.setMinimumSize(1200, 800)
-        self.resize(1400, 900)
+        self.setMinimumSize(1100, 700)
+        self.resize(1300, 800)
         
-        # OCR менеджер
         self.ocr_manager = OCREngineManager(languages=['ru', 'en'])
         self.current_file = None
         self.current_result = None
@@ -186,32 +284,25 @@ class MainWindow(QMainWindow):
         self._update_engine_info()
     
     def _init_ui(self):
-        """Инициализация интерфейса"""
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(8)
         
-        # Верхняя панель с настройками
+        # Верхняя панель
         main_layout.addWidget(self._create_top_panel())
         
-        # Основной разделитель (левая/правая части)
+        # Основной разделитель
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Левая панель - загрузка и превью
         splitter.addWidget(self._create_left_panel())
-        
-        # Правая панель - результаты
         splitter.addWidget(self._create_right_panel())
-        
-        splitter.setSizes([450, 750])
+        splitter.setSizes([400, 700])
         main_layout.addWidget(splitter, 1)
         
-        # Нижняя панель - прогресс
+        # Нижняя панель
         main_layout.addWidget(self._create_bottom_panel())
         
-        # Статусная строка
         self.statusBar().showMessage("Готов к работе")
     
     # ========== ВЕРХНЯЯ ПАНЕЛЬ ==========
@@ -219,26 +310,23 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("topPanel")
         layout = QHBoxLayout(panel)
-        layout.setContentsMargins(15, 10, 15, 10)
+        layout.setContentsMargins(12, 8, 12, 8)
         
-        # Заголовок
         title = QLabel("📄 DocumentOCR")
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         layout.addWidget(title)
         
-        layout.addSpacing(30)
+        layout.addSpacing(20)
         
-        # Выбор OCR движка
         layout.addWidget(QLabel("Движок:"))
         self.engine_combo = QComboBox()
-        self.engine_combo.setMinimumWidth(150)
+        self.engine_combo.setMinimumWidth(140)
         self._populate_engines()
         self.engine_combo.currentTextChanged.connect(self._on_engine_changed)
         layout.addWidget(self.engine_combo)
         
-        layout.addSpacing(15)
+        layout.addSpacing(10)
         
-        # Языки
         self.chk_russian = QCheckBox("Русский")
         self.chk_russian.setChecked(True)
         layout.addWidget(self.chk_russian)
@@ -247,17 +335,14 @@ class MainWindow(QMainWindow):
         self.chk_english.setChecked(True)
         layout.addWidget(self.chk_english)
         
-        layout.addSpacing(15)
+        layout.addSpacing(10)
         
-        # Предобработка
         self.chk_preprocess = QCheckBox("Предобработка")
         self.chk_preprocess.setChecked(True)
-        self.chk_preprocess.setToolTip("Улучшение качества для лучшего OCR")
         layout.addWidget(self.chk_preprocess)
         
-        layout.addSpacing(15)
+        layout.addSpacing(10)
         
-        # DPI для PDF
         layout.addWidget(QLabel("DPI:"))
         self.dpi_spin = QSpinBox()
         self.dpi_spin.setRange(150, 600)
@@ -267,9 +352,8 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
         
-        # Кнопка помощи
         help_btn = QPushButton("❓")
-        help_btn.setFixedSize(35, 35)
+        help_btn.setFixedSize(32, 32)
         help_btn.clicked.connect(self._show_help)
         layout.addWidget(help_btn)
         
@@ -281,15 +365,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Область загрузки (drag & drop)
+        # Компактная область загрузки
         self.drop_area = DropArea()
         self.drop_area.file_dropped.connect(self._on_file_dropped)
-        layout.addWidget(self.drop_area, 2)
+        layout.addWidget(self.drop_area)
         
         # Кнопки действий
         btn_layout = QHBoxLayout()
         
-        self.btn_open = QPushButton("📂 Открыть файл")
+        self.btn_open = QPushButton("📂 Открыть")
         self.btn_open.clicked.connect(self._open_file)
         btn_layout.addWidget(self.btn_open)
         
@@ -316,6 +400,23 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(info_group)
         
+        # Информация о разработчике
+        dev_group = QGroupBox("О программе")
+        dev_layout = QVBoxLayout(dev_group)
+        
+        dev_label = QLabel(
+            "<b>Разработчик:</b> Уклеин И.В.<br>"
+            "<b>Организация:</b> АО «СТНГ»<br>"
+            "<b>Город:</b> г. Новосибирск<br>"
+            "<b>Год:</b> 2026"
+        )
+        dev_label.setWordWrap(True)
+        dev_label.setStyleSheet("color: #333; font-size: 11px; padding: 5px;")
+        dev_layout.addWidget(dev_label)
+        
+        layout.addWidget(dev_group)
+        layout.addStretch()
+        
         return panel
     
     # ========== ПРАВАЯ ПАНЕЛЬ ==========
@@ -324,7 +425,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Вкладки с результатами
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_text_tab(), "📝 Распознанный текст")
         self.tabs.addTab(self._create_tables_tab(), "📊 Таблицы")
@@ -346,10 +446,18 @@ class MainWindow(QMainWindow):
         self.btn_save_json.setEnabled(False)
         export_layout.addWidget(self.btn_save_json)
         
-        self.btn_copy = QPushButton("📋 Копировать текст")
+        self.btn_copy = QPushButton("📋 Копировать")
         self.btn_copy.clicked.connect(self._copy_text)
         self.btn_copy.setEnabled(False)
         export_layout.addWidget(self.btn_copy)
+        
+        # Кнопка вывода готового файла
+        self.btn_export_file = QPushButton("📤 Вывести готовый файл")
+        self.btn_export_file.setObjectName("primaryButton")
+        self.btn_export_file.clicked.connect(self._export_ready_file)
+        self.btn_export_file.setEnabled(False)
+        self.btn_export_file.setToolTip("Сохранить результат в выбранном формате")
+        export_layout.addWidget(self.btn_export_file)
         
         export_layout.addStretch()
         layout.addLayout(export_layout)
@@ -396,7 +504,6 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Общая статистика
         stats_group = QGroupBox("📈 Общая статистика")
         stats_layout = QVBoxLayout(stats_group)
         
@@ -411,7 +518,6 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(stats_group)
         
-        # Анализ шрифтов
         font_group = QGroupBox("🔤 Анализ шрифтов")
         font_layout = QVBoxLayout(font_group)
         
@@ -453,7 +559,7 @@ class MainWindow(QMainWindow):
         panel = QFrame()
         panel.setObjectName("bottomPanel")
         layout = QHBoxLayout(panel)
-        layout.setContentsMargins(15, 10, 15, 10)
+        layout.setContentsMargins(12, 8, 12, 8)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -474,7 +580,6 @@ class MainWindow(QMainWindow):
     
     # ========== СТИЛИ ==========
     def _apply_styles(self):
-        """Применение современного стиля"""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f5f7;
@@ -506,8 +611,8 @@ class MainWindow(QMainWindow):
                 background-color: #ffffff;
                 border: 1px solid #c0c0c0;
                 border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 13px;
+                padding: 6px 12px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #f0f0f0;
@@ -579,7 +684,6 @@ class MainWindow(QMainWindow):
     
     # ========== МЕТОДЫ ==========
     def _populate_engines(self):
-        """Заполнение списка доступных движков"""
         self.engine_combo.clear()
         available = self.ocr_manager.get_available_engines()
         if available:
@@ -592,7 +696,6 @@ class MainWindow(QMainWindow):
             self.engine_combo.addItem("Нет доступных движков")
     
     def _update_engine_info(self):
-        """Обновление информации о доступных движках"""
         available = self.ocr_manager.get_available_engines()
         if not available:
             QMessageBox.warning(
@@ -605,12 +708,10 @@ class MainWindow(QMainWindow):
             )
     
     def _on_engine_changed(self, engine_name):
-        """Смена OCR движка"""
         if self.ocr_manager.switch_engine(engine_name):
             self.statusBar().showMessage(f"Переключено на {engine_name}", 3000)
     
     def _open_file(self):
-        """Открытие файла через диалог"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Выберите документ",
@@ -621,11 +722,9 @@ class MainWindow(QMainWindow):
             self._load_file(file_path)
     
     def _on_file_dropped(self, file_path):
-        """Обработка файла из drag&drop"""
         self._load_file(file_path)
     
     def _load_file(self, file_path):
-        """Загрузка информации о файле"""
         if not os.path.exists(file_path):
             QMessageBox.critical(self, "Ошибка", f"Файл не найден:\n{file_path}")
             return
@@ -639,7 +738,6 @@ class MainWindow(QMainWindow):
         self.lbl_filesize.setText(f"Размер: {self._format_size(size)}")
         self.lbl_filetype.setText(f"Тип: {ext.upper().replace('.', '')}")
         
-        # Получение размеров для изображений
         if ext in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp']:
             try:
                 img = Image.open(file_path)
@@ -654,7 +752,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Загружен: {filename}", 3000)
     
     def _format_size(self, size):
-        """Форматирование размера файла"""
         for unit in ['Б', 'КБ', 'МБ', 'ГБ']:
             if size < 1024:
                 return f"{size:.1f} {unit}"
@@ -662,11 +759,9 @@ class MainWindow(QMainWindow):
         return f"{size:.1f} ТБ"
     
     def _start_processing(self):
-        """Запуск обработки документа"""
         if not self.current_file:
             return
         
-        # Обновление языков
         langs = []
         if self.chk_russian.isChecked():
             langs.append('ru')
@@ -676,7 +771,6 @@ class MainWindow(QMainWindow):
             langs = ['ru', 'en']
         self.ocr_manager.languages = langs
         
-        # Запуск потока
         self.processing_thread = ProcessingThread(
             self.current_file,
             self.ocr_manager,
@@ -688,7 +782,6 @@ class MainWindow(QMainWindow):
         self.processing_thread.error.connect(self._on_error)
         self.processing_thread.page_processed.connect(self._on_page_processed)
         
-        # Блокировка интерфейса
         self.btn_process.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
@@ -697,22 +790,18 @@ class MainWindow(QMainWindow):
         self.processing_thread.start()
     
     def _stop_processing(self):
-        """Остановка обработки"""
         if self.processing_thread and self.processing_thread.isRunning():
             self.processing_thread.stop()
             self.lbl_status.setText("Остановка...")
     
     def _on_progress(self, value, message):
-        """Обновление прогресса"""
         self.progress_bar.setValue(value)
         self.lbl_status.setText(message)
     
     def _on_page_processed(self, current, total):
-        """Обработка страницы"""
         self.statusBar().showMessage(f"Страница {current} из {total}", 2000)
     
     def _on_finished(self, result):
-        """Обработка завершена"""
         self.current_result = result
         self._display_result(result)
         
@@ -721,13 +810,13 @@ class MainWindow(QMainWindow):
         self.btn_save_txt.setEnabled(True)
         self.btn_save_json.setEnabled(True)
         self.btn_copy.setEnabled(True)
+        self.btn_export_file.setEnabled(True)
         
         self.progress_bar.setValue(100)
         self.lbl_status.setText("✓ Обработка завершена")
         self.statusBar().showMessage("Готово", 5000)
     
     def _on_error(self, error_msg):
-        """Обработка ошибки"""
         QMessageBox.critical(self, "Ошибка обработки", error_msg)
         
         self.btn_process.setEnabled(True)
@@ -736,19 +825,15 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"✗ Ошибка: {error_msg[:50]}")
     
     def _display_result(self, result):
-        """Отображение результатов"""
-        # Текст
         text = result.get('full_text', result.get('text', ''))
         self.text_result.setPlainText(text)
         
-        # Статистика
         conf = result.get('overall_confidence', result.get('confidence', 0))
         self.lbl_confidence.setText(f"Уверенность распознавания: {conf:.1%}")
         self.lbl_engine.setText(f"Использованный движок: {result.get('engine_used', '—')}")
         self.lbl_blocks.setText(f"Количество блоков: {result.get('blocks_count', '—')}")
         self.lbl_language.setText(f"Язык: {result.get('language', '—')}")
         
-        # Анализ шрифтов
         font = result.get('font_analysis', {})
         if font:
             self.lbl_font_type.setText(f"Тип шрифта: {font.get('estimated_font', '—')}")
@@ -758,15 +843,10 @@ class MainWindow(QMainWindow):
             self.lbl_bold.setText(f"Жирный текст: {font.get('bold_percentage', 0):.1f}%")
             self.lbl_italic.setText(f"Курсив: {font.get('italic_percentage', 0):.1f}%")
         
-        # Таблицы
         self._display_tables(result.get('tables', []))
-        
-        # Страницы
         self._display_pages(result.get('pages', []))
     
     def _display_tables(self, tables):
-        """Отображение таблиц"""
-        # Очистка контейнера
         while self.tables_container.count():
             item = self.tables_container.takeAt(0)
             if item.widget():
@@ -805,7 +885,6 @@ class MainWindow(QMainWindow):
                     table_widget.setMaximumHeight(min(400, 50 + rows * 30))
                     layout.addWidget(table_widget)
                     
-                    # Кнопка экспорта таблицы
                     btn_export = QPushButton(f"💾 Экспорт таблицы {i} в CSV")
                     btn_export.clicked.connect(
                         lambda checked, t=table, idx=i: self._export_table(t, idx)
@@ -817,7 +896,6 @@ class MainWindow(QMainWindow):
             self.tables_container.addWidget(group)
     
     def _display_pages(self, pages):
-        """Отображение страниц"""
         self.pages_data = pages
         self.pages_list.clear()
         
@@ -832,13 +910,11 @@ class MainWindow(QMainWindow):
         self.pages_list.setCurrentIndex(0)
     
     def _on_page_changed(self, index):
-        """Смена страницы"""
         if 0 <= index < len(self.pages_data):
             page = self.pages_data[index]
             self.page_text.setPlainText(page.get('text', ''))
     
     def _save_result(self, format_type):
-        """Сохранение результата"""
         if not self.current_result:
             return
         
@@ -864,7 +940,6 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Сохранено: {file_path}", 5000)
     
     def _export_table(self, table, idx):
-        """Экспорт таблицы в CSV"""
         if 'data' not in table:
             return
         
@@ -877,8 +952,58 @@ class MainWindow(QMainWindow):
                 writer.writerows(table['data'])
             self.statusBar().showMessage(f"Таблица сохранена: {file_path}", 5000)
     
+    def _export_ready_file(self):
+        """Кнопка вывода готового файла - открывает диалог выбора формата"""
+        if not self.current_result:
+            QMessageBox.warning(self, "Внимание", "Сначала обработайте документ")
+            return
+        
+        # Диалог выбора формата
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Вывод готового файла")
+        dialog.setText("Выберите формат сохранения:")
+        dialog.setInformativeText(
+            f"Документ: {os.path.basename(self.current_file)}\n"
+            f"Страниц: {self.current_result.get('total_pages', 1)}\n"
+            f"Уверенность: {self.current_result.get('confidence', 0):.1%}"
+        )
+        
+        btn_txt = dialog.addButton("📄 TXT (текст)", QMessageBox.ButtonRole.AcceptRole)
+        btn_json = dialog.addButton("📋 JSON (полные данные)", QMessageBox.ButtonRole.AcceptRole)
+        btn_csv = dialog.addButton("📊 CSV (таблицы)", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        
+        dialog.exec()
+        
+        clicked = dialog.clickedButton()
+        
+        if clicked == btn_txt:
+            self._save_result('txt')
+        elif clicked == btn_json:
+            self._save_result('json')
+        elif clicked == btn_csv:
+            self._export_all_tables()
+    
+    def _export_all_tables(self):
+        """Экспорт всех таблиц в один CSV"""
+        if not self.current_result or not self.current_result.get('tables'):
+            QMessageBox.warning(self, "Внимание", "Таблицы не найдены")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт всех таблиц", "all_tables.csv", "CSV файлы (*.csv)"
+        )
+        if file_path:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                for i, table in enumerate(self.current_result['tables'], 1):
+                    if 'data' in table:
+                        writer.writerow([f"=== ТАБЛИЦА {i} ==="])
+                        writer.writerows(table['data'])
+                        writer.writerow([])
+            self.statusBar().showMessage(f"Все таблицы сохранены: {file_path}", 5000)
+    
     def _copy_text(self):
-        """Копирование текста в буфер"""
         if self.current_result:
             text = self.current_result.get('full_text', 
                                            self.current_result.get('text', ''))
@@ -886,10 +1011,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("✓ Текст скопирован в буфер обмена", 3000)
     
     def _show_help(self):
-        """Показать справку"""
         QMessageBox.information(
             self, "Справка",
             "<h3>DocumentOCR — Распознавание документов</h3>"
+            "<p><b>Разработчик:</b> Уклеин И.В.</p>"
+            "<p><b>Организация:</b> АО «СТНГ»</p>"
+            "<p><b>Город:</b> г. Новосибирск, 2026</p>"
+            "<hr>"
             "<p><b>Возможности:</b></p>"
             "<ul>"
             "<li>Распознавание текста из PDF и изображений</li>"
@@ -900,83 +1028,12 @@ class MainWindow(QMainWindow):
             "</ul>"
             "<p><b>Использование:</b></p>"
             "<ol>"
-            "<li>Перетащите файл в область загрузки или нажмите 'Открыть файл'</li>"
+            "<li>Перетащите файл в область загрузки или нажмите «Открыть»</li>"
             "<li>Выберите OCR движок и настройки</li>"
-            "<li>Нажмите 'Распознать'</li>"
-            "<li>Сохраните результат в TXT или JSON</li>"
+            "<li>Нажмите «Распознать»</li>"
+            "<li>Нажмите «Вывести готовый файл» для сохранения</li>"
             "</ol>"
         )
-
-
-# ============================================================
-# ОБЛАСТЬ DRAG & DROP
-# ============================================================
-
-class DropArea(QFrame):
-    """Область для перетаскивания файлов"""
-    
-    file_dropped = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setMinimumHeight(200)
-        self.setObjectName("dropArea")
-        
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        self.icon_label = QLabel("📁")
-        self.icon_label.setFont(QFont("Segoe UI Emoji", 48))
-        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.icon_label)
-        
-        self.text_label = QLabel("Перетащите файл сюда\nили нажмите «Открыть файл»")
-        self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.text_label.setStyleSheet("color: #666; font-size: 14px;")
-        layout.addWidget(self.text_label)
-        
-        self._apply_styles()
-    
-    def _apply_styles(self):
-        self.setStyleSheet("""
-            #dropArea {
-                background-color: #fafafa;
-                border: 2px dashed #c0c0c0;
-                border-radius: 10px;
-            }
-            #dropArea:hover {
-                background-color: #f0f7ff;
-                border-color: #0078d4;
-            }
-        """)
-    
-    def set_file(self, filename):
-        self.text_label.setText(f"✓ {filename}")
-        self.icon_label.setText("✓")
-    
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-            self.setStyleSheet("""
-                #dropArea {
-                    background-color: #e3f2fd;
-                    border: 2px dashed #0078d4;
-                    border-radius: 10px;
-                }
-            """)
-        else:
-            event.ignore()
-    
-    def dragLeaveEvent(self, event):
-        self._apply_styles()
-    
-    def dropEvent(self, event):
-        self._apply_styles()
-        urls = event.mimeData().urls()
-        if urls:
-            file_path = urls[0].toLocalFile()
-            self.file_dropped.emit(file_path)
 
 
 # ============================================================
@@ -986,7 +1043,6 @@ class DropArea(QFrame):
 def main():
     app = QApplication(sys.argv)
     
-    # Установка шрифта
     font = QFont("Segoe UI", 10)
     app.setFont(font)
     
