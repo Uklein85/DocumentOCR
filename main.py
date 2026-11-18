@@ -1,5 +1,6 @@
 """
 DocumentOCR - Программа для распознавания сканированных документов
+
 Разработчик: Уклеин И.В.
 Организация: АО "СТНГ"
 Город: г. Новосибирск
@@ -8,6 +9,17 @@ DocumentOCR - Программа для распознавания сканир�
 
 import sys
 import os
+
+# ВАЖНО: установить TESSDATA_PREFIX ДО импорта ocr_engines
+tesseract_paths = [
+    r'C:\Program Files\Tesseract-OCR\tessdata',
+    r'C:\Program Files (x86)\Tesseract-OCR\tessdata',
+]
+for path in tesseract_paths:
+    if os.path.exists(path):
+        os.environ['TESSDATA_PREFIX'] = path
+        break
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -16,17 +28,15 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTextEdit, QTabWidget,
     QProgressBar, QComboBox, QCheckBox, QGroupBox, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QStatusBar,
-    QMessageBox, QFrame, QScrollArea, QSizePolicy, QSpinBox,
-    QStatusBar
+    QMessageBox, QFrame, QScrollArea, QSpinBox, QDialog,
+    QRadioButton, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon, QPalette, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PIL import Image
 import json
 import csv
-from datetime import datetime
 
-# Импорт OCR движков
 from ocr_engines import OCREngineManager, ImagePreprocessor, FontAnalyzer, TableExtractor
 
 
@@ -69,7 +79,6 @@ class ProcessingThread(QThread):
             
             if self._is_running:
                 self.finished.emit(result)
-                
         except Exception as e:
             self.error.emit(str(e))
     
@@ -113,9 +122,12 @@ class ProcessingThread(QThread):
     def _process_pdf(self):
         """Обработка PDF через PyMuPDF (не требует Poppler)"""
         try:
-            import fitz  # PyMuPDF
+            import pymupdf as fitz
         except ImportError:
-            raise ImportError("Установите PyMuPDF: pip install PyMuPDF")
+            try:
+                import fitz
+            except ImportError:
+                raise ImportError("Установите PyMuPDF: pip install pymupdf")
         
         self.progress.emit(5, "Открытие PDF...")
         
@@ -191,7 +203,7 @@ class ProcessingThread(QThread):
 
 
 # ============================================================
-# ОБЛАСТЬ DRAG & DROP (УМЕНЬШЕННАЯ)
+# ОБЛАСТЬ DRAG & DROP (КОМПАКТНАЯ)
 # ============================================================
 
 class DropArea(QFrame):
@@ -202,22 +214,22 @@ class DropArea(QFrame):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self.setMinimumHeight(120)
-        self.setMaximumHeight(150)
+        self.setMinimumHeight(100)
+        self.setMaximumHeight(120)
         self.setObjectName("dropArea")
         
         layout = QHBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 8, 10, 8)
         
         self.icon_label = QLabel("📁")
-        self.icon_label.setFont(QFont("Segoe UI Emoji", 32))
+        self.icon_label.setFont(QFont("Segoe UI Emoji", 28))
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.icon_label)
         
-        self.text_label = QLabel("Перетащите файл сюда\nили нажмите «Открыть файл»")
+        self.text_label = QLabel("Перетащите файл сюда\nили нажмите «Открыть»")
         self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.text_label.setStyleSheet("color: #666; font-size: 12px;")
+        self.text_label.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(self.text_label)
         
         self._apply_styles()
@@ -264,6 +276,64 @@ class DropArea(QFrame):
 
 
 # ============================================================
+# ДИАЛОГ ВЫВОДА ГОТОВОГО ФАЙЛА
+# ============================================================
+
+class ExportDialog(QDialog):
+    """Диалог выбора формата экспорта"""
+    
+    def __init__(self, parent, file_info: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Вывод готового файла")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Информация о документе
+        info_label = QLabel(
+            f"<b>Документ:</b> {file_info.get('filename', 'Неизвестно')}<br>"
+            f"<b>Страниц:</b> {file_info.get('pages', 1)}<br>"
+            f"<b>Уверенность:</b> {file_info.get('confidence', 0):.1%}<br>"
+            f"<b>Движок:</b> {file_info.get('engine', '—')}"
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("padding: 10px; background-color: #f5f5f7; border-radius: 6px;")
+        layout.addWidget(info_label)
+        
+        layout.addWidget(QLabel("<b>Выберите формат сохранения:</b>"))
+        
+        # Радиокнопки форматов
+        self.format_group = QRadioButton()
+        self.radio_txt = QRadioButton("📄 TXT - только текст")
+        self.radio_txt.setChecked(True)
+        self.radio_json = QRadioButton("📋 JSON - полные данные (текст, таблицы, анализ)")
+        self.radio_csv = QRadioButton("📊 CSV - таблицы")
+        self.radio_all = QRadioButton("📦 Все форматы (TXT + JSON + CSV)")
+        
+        for radio in [self.radio_txt, self.radio_json, self.radio_csv, self.radio_all]:
+            layout.addWidget(radio)
+        
+        # Кнопки
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_selected_format(self) -> str:
+        if self.radio_txt.isChecked():
+            return 'txt'
+        elif self.radio_json.isChecked():
+            return 'json'
+        elif self.radio_csv.isChecked():
+            return 'csv'
+        elif self.radio_all.isChecked():
+            return 'all'
+        return 'txt'
+
+
+# ============================================================
 # ГЛАВНОЕ ОКНО
 # ============================================================
 
@@ -297,7 +367,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._create_left_panel())
         splitter.addWidget(self._create_right_panel())
-        splitter.setSizes([400, 700])
+        splitter.setSizes([380, 720])
         main_layout.addWidget(splitter, 1)
         
         # Нижняя панель
@@ -393,7 +463,7 @@ class MainWindow(QMainWindow):
         self.lbl_filetype = QLabel("Тип: —")
         self.lbl_dimensions = QLabel("Разрешение: —")
         
-        for lbl in [self.lbl_filename, self.lbl_filesize, 
+        for lbl in [self.lbl_filename, self.lbl_filesize,
                     self.lbl_filetype, self.lbl_dimensions]:
             lbl.setWordWrap(True)
             info_layout.addWidget(lbl)
@@ -436,12 +506,12 @@ class MainWindow(QMainWindow):
         # Кнопки экспорта
         export_layout = QHBoxLayout()
         
-        self.btn_save_txt = QPushButton("💾 Сохранить TXT")
+        self.btn_save_txt = QPushButton("💾 TXT")
         self.btn_save_txt.clicked.connect(lambda: self._save_result('txt'))
         self.btn_save_txt.setEnabled(False)
         export_layout.addWidget(self.btn_save_txt)
         
-        self.btn_save_json = QPushButton("💾 Сохранить JSON")
+        self.btn_save_json = QPushButton("💾 JSON")
         self.btn_save_json.clicked.connect(lambda: self._save_result('json'))
         self.btn_save_json.setEnabled(False)
         export_layout.addWidget(self.btn_save_json)
@@ -451,7 +521,7 @@ class MainWindow(QMainWindow):
         self.btn_copy.setEnabled(False)
         export_layout.addWidget(self.btn_copy)
         
-        # Кнопка вывода готового файла
+        # КНОПКА ВЫВОДА ГОТОВОГО ФАЙЛА
         self.btn_export_file = QPushButton("📤 Вывести готовый файл")
         self.btn_export_file.setObjectName("primaryButton")
         self.btn_export_file.clicked.connect(self._export_ready_file)
@@ -512,7 +582,7 @@ class MainWindow(QMainWindow):
         self.lbl_blocks = QLabel("Количество блоков: —")
         self.lbl_language = QLabel("Язык: —")
         
-        for lbl in [self.lbl_confidence, self.lbl_engine, 
+        for lbl in [self.lbl_confidence, self.lbl_engine,
                     self.lbl_blocks, self.lbl_language]:
             stats_layout.addWidget(lbl)
         
@@ -527,7 +597,7 @@ class MainWindow(QMainWindow):
         self.lbl_bold = QLabel("Жирный текст: —")
         self.lbl_italic = QLabel("Курсив: —")
         
-        for lbl in [self.lbl_font_type, self.lbl_font_size, 
+        for lbl in [self.lbl_font_type, self.lbl_font_size,
                     self.lbl_font_range, self.lbl_bold, self.lbl_italic]:
             font_layout.addWidget(lbl)
         
@@ -630,6 +700,7 @@ class MainWindow(QMainWindow):
                 color: white;
                 border: none;
                 font-weight: bold;
+                padding: 8px 16px;
             }
             #primaryButton:hover {
                 background-color: #106ebe;
@@ -702,9 +773,9 @@ class MainWindow(QMainWindow):
                 self, "Внимание",
                 "Не найдено ни одного OCR движка!\n\n"
                 "Установите хотя бы один:\n"
-                "• pip install easyocr\n"
-                "• pip install rapidocr-onnxruntime\n"
-                "• pip install paddlepaddle paddleocr"
+                "• pip install rapidocr-onnxruntime (рекомендуется)\n"
+                "• pip install pytesseract (нужен Tesseract OCR)\n"
+                "• pip install easyocr"
             )
     
     def _on_engine_changed(self, engine_name):
@@ -923,7 +994,7 @@ class MainWindow(QMainWindow):
                 self, "Сохранить текст", "result.txt", "Текстовые файлы (*.txt)"
             )
             if file_path:
-                text = self.current_result.get('full_text', 
+                text = self.current_result.get('full_text',
                                                self.current_result.get('text', ''))
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(text)
@@ -935,7 +1006,7 @@ class MainWindow(QMainWindow):
             )
             if file_path:
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.current_result, f, ensure_ascii=False, 
+                    json.dump(self.current_result, f, ensure_ascii=False,
                              indent=2, default=str)
                 self.statusBar().showMessage(f"Сохранено: {file_path}", 5000)
     
@@ -958,41 +1029,88 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Внимание", "Сначала обработайте документ")
             return
         
-        # Диалог выбора формата
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Вывод готового файла")
-        dialog.setText("Выберите формат сохранения:")
-        dialog.setInformativeText(
-            f"Документ: {os.path.basename(self.current_file)}\n"
-            f"Страниц: {self.current_result.get('total_pages', 1)}\n"
-            f"Уверенность: {self.current_result.get('confidence', 0):.1%}"
-        )
+        # Информация о файле для диалога
+        file_info = {
+            'filename': os.path.basename(self.current_file) if self.current_file else 'Неизвестно',
+            'pages': self.current_result.get('total_pages', 1),
+            'confidence': self.current_result.get('confidence', 0),
+            'engine': self.current_result.get('engine_used', '—')
+        }
         
-        btn_txt = dialog.addButton("📄 TXT (текст)", QMessageBox.ButtonRole.AcceptRole)
-        btn_json = dialog.addButton("📋 JSON (полные данные)", QMessageBox.ButtonRole.AcceptRole)
-        btn_csv = dialog.addButton("📊 CSV (таблицы)", QMessageBox.ButtonRole.AcceptRole)
-        dialog.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-        
-        dialog.exec()
-        
-        clicked = dialog.clickedButton()
-        
-        if clicked == btn_txt:
-            self._save_result('txt')
-        elif clicked == btn_json:
-            self._save_result('json')
-        elif clicked == btn_csv:
-            self._export_all_tables()
-    
-    def _export_all_tables(self):
-        """Экспорт всех таблиц в один CSV"""
-        if not self.current_result or not self.current_result.get('tables'):
-            QMessageBox.warning(self, "Внимание", "Таблицы не найдены")
+        dialog = ExportDialog(self, file_info)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт всех таблиц", "all_tables.csv", "CSV файлы (*.csv)"
-        )
+        selected_format = dialog.get_selected_format()
+        
+        # Базовое имя файла
+        base_name = os.path.splitext(self.current_file)[0] if self.current_file else "result"
+        
+        if selected_format == 'txt':
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить TXT", f"{base_name}.txt", "Текстовые файлы (*.txt)"
+            )
+            if file_path:
+                text = self.current_result.get('full_text', self.current_result.get('text', ''))
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                self.statusBar().showMessage(f"✓ Сохранено: {file_path}", 5000)
+        
+        elif selected_format == 'json':
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить JSON", f"{base_name}.json", "JSON файлы (*.json)"
+            )
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.current_result, f, ensure_ascii=False,
+                             indent=2, default=str)
+                self.statusBar().showMessage(f"✓ Сохранено: {file_path}", 5000)
+        
+        elif selected_format == 'csv':
+            self._export_all_tables(f"{base_name}_tables.csv")
+        
+        elif selected_format == 'all':
+            # Сохранить все форматы
+            txt_path = f"{base_name}.txt"
+            json_path = f"{base_name}.json"
+            csv_path = f"{base_name}_tables.csv"
+            
+            # TXT
+            text = self.current_result.get('full_text', self.current_result.get('text', ''))
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            
+            # JSON
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.current_result, f, ensure_ascii=False,
+                         indent=2, default=str)
+            
+            # CSV
+            self._export_all_tables(csv_path, force=True)
+            
+            QMessageBox.information(
+                self, "Готово",
+                f"Файлы сохранены:\n"
+                f"• {txt_path}\n"
+                f"• {json_path}\n"
+                f"• {csv_path}"
+            )
+            self.statusBar().showMessage("✓ Все файлы сохранены", 5000)
+    
+    def _export_all_tables(self, default_path: str, force: bool = False):
+        """Экспорт всех таблиц в один CSV"""
+        if not self.current_result or not self.current_result.get('tables'):
+            if not force:
+                QMessageBox.warning(self, "Внимание", "Таблицы не найдены")
+            return
+        
+        if force:
+            file_path = default_path
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Экспорт всех таблиц", default_path, "CSV файлы (*.csv)"
+            )
+        
         if file_path:
             with open(file_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -1001,22 +1119,24 @@ class MainWindow(QMainWindow):
                         writer.writerow([f"=== ТАБЛИЦА {i} ==="])
                         writer.writerows(table['data'])
                         writer.writerow([])
-            self.statusBar().showMessage(f"Все таблицы сохранены: {file_path}", 5000)
+            if not force:
+                self.statusBar().showMessage(f"✓ Все таблицы сохранены: {file_path}", 5000)
     
     def _copy_text(self):
         if self.current_result:
-            text = self.current_result.get('full_text', 
+            text = self.current_result.get('full_text',
                                            self.current_result.get('text', ''))
             QApplication.clipboard().setText(text)
             self.statusBar().showMessage("✓ Текст скопирован в буфер обмена", 3000)
     
     def _show_help(self):
         QMessageBox.information(
-            self, "Справка",
+            self, "Справка о программе",
             "<h3>DocumentOCR — Распознавание документов</h3>"
             "<p><b>Разработчик:</b> Уклеин И.В.</p>"
             "<p><b>Организация:</b> АО «СТНГ»</p>"
-            "<p><b>Город:</b> г. Новосибирск, 2026</p>"
+            "<p><b>Город:</b> г. Новосибирск</p>"
+            "<p><b>Год:</b> 2026</p>"
             "<hr>"
             "<p><b>Возможности:</b></p>"
             "<ul>"
@@ -1031,7 +1151,7 @@ class MainWindow(QMainWindow):
             "<li>Перетащите файл в область загрузки или нажмите «Открыть»</li>"
             "<li>Выберите OCR движок и настройки</li>"
             "<li>Нажмите «Распознать»</li>"
-            "<li>Нажмите «Вывести готовый файл» для сохранения</li>"
+            "<li>Нажмите «📤 Вывести готовый файл» для сохранения</li>"
             "</ol>"
         )
 
