@@ -1,6 +1,7 @@
 """
 OCR Engines Module
 Модуль с поддержкой нескольких OCR движков для распознавания текста
+Использует PyMuPDF для работы с PDF (не требует Poppler)
 """
 
 import os
@@ -62,12 +63,10 @@ class OCREngine(ABC):
     
     @abstractmethod
     def recognize(self, image: np.ndarray) -> OCRResult:
-        """Распознавание текста на изображении"""
         pass
     
     @abstractmethod
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        """Распознавание с детальной информацией о блоках"""
         pass
 
 
@@ -76,10 +75,7 @@ class OCREngine(ABC):
 # ============================================================
 
 class EasyOCREngine(OCREngine):
-    """
-    EasyOCR - открытый код, PyTorch-based
-    Поддержка 80+ языков, включая русский
-    """
+    """EasyOCR - открытый код, PyTorch-based"""
     
     def __init__(self, languages: List[str] = None, gpu: bool = False):
         super().__init__(languages)
@@ -88,9 +84,7 @@ class EasyOCREngine(OCREngine):
         
         try:
             import easyocr
-            lang_map = {
-                'ru': 'ru', 'en': 'en', 'rus': 'ru', 'eng': 'en'
-            }
+            lang_map = {'ru': 'ru', 'en': 'en', 'rus': 'ru', 'eng': 'en'}
             self.easyocr_langs = [lang_map.get(l, l) for l in self.languages]
             
             logger.info(f"Инициализация EasyOCR с языками: {self.easyocr_langs}")
@@ -100,16 +94,16 @@ class EasyOCREngine(OCREngine):
                 verbose=False
             )
             self._is_available = True
-            logger.info("EasyOCR успешно инициализирован")
-        except ImportError:
-            logger.warning("EasyOCR не установлен. Установите: pip install easyocr")
+            logger.info("✅ EasyOCR успешно инициализирован")
+        except ImportError as e:
+            logger.warning(f"❌ EasyOCR не установлен: {e}")
+            logger.warning("   Решение: pip install easyocr")
             self._is_available = False
         except Exception as e:
-            logger.error(f"Ошибка инициализации EasyOCR: {e}")
+            logger.error(f"❌ Ошибка EasyOCR: {type(e).__name__}: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
-        """Распознавание текста"""
         if not self._is_available:
             raise RuntimeError("EasyOCR недоступен")
         
@@ -138,7 +132,6 @@ class EasyOCREngine(OCREngine):
         )
     
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        """Распознавание с анализом размеров шрифтов"""
         result = self.recognize(image)
         
         for block in result.blocks:
@@ -150,7 +143,6 @@ class EasyOCREngine(OCREngine):
         return result
     
     def _estimate_bold(self, image: np.ndarray, bbox: List) -> bool:
-        """Эвристика для определения жирности шрифта"""
         try:
             x_coords = [int(p[0]) for p in bbox]
             y_coords = [int(p[1]) for p in bbox]
@@ -182,10 +174,7 @@ class EasyOCREngine(OCREngine):
 # ============================================================
 
 class RapidOCREngine(OCREngine):
-    """
-    RapidOCR - легковесная обертка над PaddleOCR через ONNX
-    Не требует PaddlePaddle, работает быстрее
-    """
+    """RapidOCR - легковесная обертка над PaddleOCR через ONNX"""
     
     def __init__(self, languages: List[str] = None):
         super().__init__(languages)
@@ -195,16 +184,16 @@ class RapidOCREngine(OCREngine):
             from rapidocr_onnxruntime import RapidOCR
             self.engine = RapidOCR()
             self._is_available = True
-            logger.info("RapidOCR успешно инициализирован")
-        except ImportError:
-            logger.warning("RapidOCR не установлен. Установите: pip install rapidocr-onnxruntime")
+            logger.info("✅ RapidOCR успешно инициализирован")
+        except ImportError as e:
+            logger.warning(f"❌ RapidOCR не установлен: {e}")
+            logger.warning("   Решение: pip install rapidocr-onnxruntime")
             self._is_available = False
         except Exception as e:
-            logger.error(f"Ошибка инициализации RapidOCR: {e}")
+            logger.error(f"❌ Ошибка RapidOCR: {type(e).__name__}: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
-        """Распознавание текста"""
         if not self._is_available:
             raise RuntimeError("RapidOCR недоступен")
         
@@ -242,7 +231,6 @@ class RapidOCREngine(OCREngine):
         )
     
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        """Распознавание с деталями"""
         return self.recognize(image)
 
 
@@ -251,10 +239,7 @@ class RapidOCREngine(OCREngine):
 # ============================================================
 
 class PaddleOCREngine(OCREngine):
-    """
-    PaddleOCR от Baidu - открытый код
-    Лучшее качество для русского языка
-    """
+    """PaddleOCR от Baidu - открытый код"""
     
     def __init__(self, languages: List[str] = None, use_gpu: bool = False):
         super().__init__(languages)
@@ -274,16 +259,16 @@ class PaddleOCREngine(OCREngine):
                 show_log=False
             )
             self._is_available = True
-            logger.info("PaddleOCR успешно инициализирован")
-        except ImportError:
-            logger.warning("PaddleOCR не установлен. Установите: pip install paddlepaddle paddleocr")
+            logger.info("✅ PaddleOCR успешно инициализирован")
+        except ImportError as e:
+            logger.warning(f"❌ PaddleOCR не установлен: {e}")
+            logger.warning("   Решение: pip install paddlepaddle paddleocr")
             self._is_available = False
         except Exception as e:
-            logger.error(f"Ошибка инициализации PaddleOCR: {e}")
+            logger.error(f"❌ Ошибка PaddleOCR: {type(e).__name__}: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
-        """Распознавание текста"""
         if not self._is_available:
             raise RuntimeError("PaddleOCR недоступен")
         
@@ -321,7 +306,6 @@ class PaddleOCREngine(OCREngine):
         )
     
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        """Распознавание с деталями"""
         return self.recognize(image)
 
 
@@ -355,16 +339,15 @@ class TesseractEngine(OCREngine):
             
             pytesseract.get_tesseract_version()
             self._is_available = True
-            logger.info(f"Tesseract инициализирован с языками: {self.tess_langs}")
-        except ImportError:
-            logger.warning("pytesseract не установлен")
+            logger.info(f"✅ Tesseract инициализирован с языками: {self.tess_langs}")
+        except ImportError as e:
+            logger.warning(f"❌ pytesseract не установлен: {e}")
             self._is_available = False
         except Exception as e:
-            logger.warning(f"Tesseract недоступен: {e}")
+            logger.warning(f"❌ Tesseract недоступен: {e}")
             self._is_available = False
     
     def recognize(self, image: np.ndarray) -> OCRResult:
-        """Распознавание текста"""
         if not self._is_available:
             raise RuntimeError("Tesseract недоступен")
         
@@ -385,7 +368,6 @@ class TesseractEngine(OCREngine):
         )
     
     def recognize_with_details(self, image: np.ndarray) -> OCRResult:
-        """Распознавание с детальными данными"""
         if not self._is_available:
             raise RuntimeError("Tesseract недоступен")
         
@@ -445,7 +427,6 @@ class OCREngineManager:
         self._init_all_engines(preferred_engine)
     
     def _init_all_engines(self, preferred: str = None):
-        """Инициализация всех доступных движков"""
         logger.info("Инициализация OCR движков...")
         
         engine_classes = [
@@ -478,11 +459,9 @@ class OCREngineManager:
             logger.error("Ни один OCR движок не доступен!")
     
     def get_available_engines(self) -> List[str]:
-        """Список доступных движков"""
         return [name for name, engine in self.engines.items() if engine.is_available]
     
     def switch_engine(self, engine_name: str) -> bool:
-        """Переключение на другой движок"""
         if engine_name in self.engines and self.engines[engine_name].is_available:
             self.current_engine = self.engines[engine_name]
             logger.info(f"Переключено на: {engine_name}")
@@ -490,7 +469,6 @@ class OCREngineManager:
         return False
     
     def recognize(self, image: np.ndarray, with_details: bool = True) -> OCRResult:
-        """Распознавание с текущим движком"""
         if not self.current_engine:
             raise RuntimeError("Нет доступных OCR движков")
         
@@ -504,7 +482,6 @@ class OCREngineManager:
             return self._try_fallback(image, with_details)
     
     def _try_fallback(self, image: np.ndarray, with_details: bool) -> OCRResult:
-        """Попытка использовать другой движок при ошибке"""
         for name, engine in self.engines.items():
             if engine.is_available and engine != self.current_engine:
                 logger.info(f"Попытка использовать fallback: {name}")
@@ -549,7 +526,6 @@ class ImagePreprocessor:
     
     @staticmethod
     def deskew(image: np.ndarray) -> np.ndarray:
-        """Выравнивание наклона документа"""
         gray = ImagePreprocessor.to_grayscale(image)
         coords = np.column_stack(np.where(gray > 0))
         if len(coords) < 100:
@@ -577,7 +553,6 @@ class ImagePreprocessor:
                       denoise: bool = True,
                       enhance: bool = True,
                       binarize: bool = False) -> np.ndarray:
-        """Полный пайплайн предобработки"""
         result = cls.to_grayscale(image)
         
         if deskew:
@@ -601,7 +576,6 @@ class FontAnalyzer:
     
     @staticmethod
     def analyze_blocks(blocks: List[TextBlock]) -> Dict:
-        """Анализ шрифтов по блокам"""
         if not blocks:
             return {'estimated_font': 'Unknown', 'average_size': 0}
         
@@ -640,7 +614,6 @@ class TableExtractor:
     
     @staticmethod
     def extract_from_pdf(pdf_path: str) -> List[Dict]:
-        """Извлечение таблиц из PDF"""
         tables = []
         try:
             import camelot
@@ -662,7 +635,6 @@ class TableExtractor:
     
     @staticmethod
     def extract_from_image(image: np.ndarray) -> List[Dict]:
-        """Извлечение таблиц из изображения"""
         tables = []
         
         try:
